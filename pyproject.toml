@@ -1,0 +1,43 @@
+[build-system]
+requires      = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lxml-dataclass"
+version = "1.0.0"
+description = "Create LXML Elements as dataclasses representations"
+readme = "README.md"
+authors = [{ name = "Sebastian Salinas", email = "seba.salinas.delrio@gmail.com" }]
+license = { file = "LICENSE" }
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+]
+keywords = ["lxml", "dataclass", "xml"]
+dependencies = [
+    "lxml == 4.9.4",
+]
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+dev = ["ruff", "pip-tools", "pytest"]
+
+[project.urls]
+Homepage = "https://github.com/sebasalinass/lxml-dataclass"
+
+[tool.bumpver]
+current_version = "1.0.0"
+version_pattern = "MAJOR.MINOR.PATCH"
+commit_message  = "Bump version {old_version} -> {new_version}"
+commit          = true
+tag             = true
+push            = false
+
+[tool.bumpver.file_patterns]
+"pyproject.toml" = ['current_version = "{version}"', 'version = "{version}"']
+"src/reader/__init__.py" = ["{version}"]
+
+[pypi]
+  username = "__token__"
+  password = "pypi-5ada8e94-accd-4b0c-9e46-ab49e14678f1-"
