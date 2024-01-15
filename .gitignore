@@ -3,6 +3,7 @@ local_test.py
 __pycache__/
 *.py[cod]
 *$py.class
+.pypirc
 
 # C extensions
 *.so
