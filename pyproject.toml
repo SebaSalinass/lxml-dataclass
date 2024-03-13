@@ -1,5 +1,5 @@
 [build-system]
-requires      = ["setuptools>=61.0.0", "wheel"]
+requires = ["setuptools>=61.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -30,14 +30,10 @@ Homepage = "https://github.com/sebasalinass/lxml-dataclass"
 current_version = "1.0.0"
 version_pattern = "MAJOR.MINOR.PATCH"
 commit_message  = "Bump version {old_version} -> {new_version}"
-commit          = true
-tag             = true
-push            = false
+commit = true
+tag = true
+push = false
 
 [tool.bumpver.file_patterns]
 "pyproject.toml" = ['current_version = "{version}"', 'version = "{version}"']
 "src/reader/__init__.py" = ["{version}"]
-
-[pypi]
-  username = "__token__"
-  password = "pypi-5ada8e94-accd-4b0c-9e46-ab49e14678f1-"
