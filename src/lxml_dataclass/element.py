@@ -117,7 +117,7 @@ class ElementField:
             return value.to_lxml_element()
 
         element = ET.Element(self.tag, self.attrib, self.nsmap)
-        if value:
+        if value not in [MISSING, None]:
             element.text = (
                 format(value, self.format_spec) if self.format_spec else str(value)
             )
