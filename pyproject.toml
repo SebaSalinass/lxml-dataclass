@@ -1,10 +1,10 @@
 [build-system]
-requires      = ["setuptools>=61.0.0", "wheel"]
+requires = ["setuptools>=61.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "lxml-dataclass"
-version = "1.0.1"
+version = "1.0.3"
 description = "Create LXML Elements as dataclasses representations"
 readme = "README.md"
 authors = [{ name = "Sebastian Salinas", email = "seba.salinas.delrio@gmail.com" }]
@@ -19,7 +19,7 @@ keywords = ["lxml", "dataclass", "xml"]
 
 requires-python = ">=3.11"
 dependencies = [
-    "lxml>=5.2.1",
+    "lxml >= 4.9.4",
 ]
 
 [project.urls]
@@ -27,7 +27,9 @@ Homepage = "https://github.com/sebasalinass/lxml-dataclass"
 
 [tool.uv]
 dev-dependencies = [
+    "lxml-stubs>=0.5.1",
     "mypy>=1.15.0",
     "pytest>=8.3.5",
-    "ruff>=0.11.2",
+    "twine>=6.1.0",
 ]
+
