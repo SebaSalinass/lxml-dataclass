@@ -1,8 +1,9 @@
-import lxml.etree as ET  # type: ignore
+import re
 import sys
 import types
-import re
 import typing as t
+
+import lxml.etree as ET  # type: ignore
 
 __all__ = ("Element", "element_field")
 
@@ -645,6 +646,10 @@ class Element(metaclass=ElementMeta):
         return root
 
     def to_string_element(self, **kwargs) -> bytes:
+        """Calls `lxml.etree.tostring` function on the result of `self.to_lxml_element()`. Accepts any kwargs valid for `lxml.etree.tostring` function.
+        Returns:
+            bytes: String representation of the element
+        """
         return ET.tostring(self.to_lxml_element(), **kwargs)
 
     @classmethod

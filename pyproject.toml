@@ -4,40 +4,30 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lxml-dataclass"
-version = "1.0.0"
+version = "1.0.1"
 description = "Create LXML Elements as dataclasses representations"
 readme = "README.md"
 authors = [{ name = "Sebastian Salinas", email = "seba.salinas.delrio@gmail.com" }]
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 classifiers = [
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
 ]
 keywords = ["lxml", "dataclass", "xml"]
-dependencies = [
-    "lxml == 4.9.4",
-]
-requires-python = ">=3.11"
 
-[project.optional-dependencies]
-dev = ["ruff", "pip-tools", "pytest"]
+requires-python = ">=3.11"
+dependencies = [
+    "lxml>=5.2.1",
+]
 
 [project.urls]
 Homepage = "https://github.com/sebasalinass/lxml-dataclass"
 
-[tool.bumpver]
-current_version = "1.0.0"
-version_pattern = "MAJOR.MINOR.PATCH"
-commit_message  = "Bump version {old_version} -> {new_version}"
-commit          = true
-tag             = true
-push            = false
-
-[tool.bumpver.file_patterns]
-"pyproject.toml" = ['current_version = "{version}"', 'version = "{version}"']
-"src/reader/__init__.py" = ["{version}"]
-
-[pypi]
-  username = "__token__"
-  password = "pypi-5ada8e94-accd-4b0c-9e46-ab49e14678f1-"
+[tool.uv]
+dev-dependencies = [
+    "mypy>=1.15.0",
+    "pytest>=8.3.5",
+    "ruff>=0.11.2",
+]

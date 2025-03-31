@@ -34,7 +34,7 @@ class Author(Element):
     last: str = element_field('LastName', default='Doe')
 
     def fullname(self) -> str:
-        return self.name + self.last
+        return f"{self.name} {self.last}"
 
 author = Author('John')
 author.fullname()
