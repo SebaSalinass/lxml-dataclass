@@ -17,6 +17,10 @@ Use under your own risk.
 pip install lxml-dataclass
 ```
 
+```
+If you are having som issues with lxml version and binary execution. Try installing with --no-binary option.
+```
+
 ## Basic usage
 
 Lxml-dataclass uses big part of dataclasses implementation with some modifications that allow the implemmentation of two utility methods to the classes that inherit from `Element` base class `to_lxml_element` and `from_lxml_element`. Using the `element_field` function allows the metaclass to keep tracking of many lxml.etree attributes. 
