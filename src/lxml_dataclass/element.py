@@ -5,7 +5,9 @@ import typing as t
 
 import lxml.etree as ET  # type: ignore
 
-__all__ = ("Element", "element_field")
+__all__ = ("LxmlElement", "Element", "element_field")
+
+LxmlElement: t.TypeAlias = ET._Element
 
 
 class _FIELD_BASE:
@@ -295,7 +297,7 @@ def _get_field(cls, a_name, a_type, default_kw_only, typing=None):
     # Special restrictions for ClassVar and InitVar.
     if f._field_type in (_FIELD_CLASSVAR, _FIELD_INITVAR):
         if f.default_factory is not MISSING:
-            raise TypeError(f"field {f.name} cannot have a " "default factory")
+            raise TypeError(f"field {f.name} cannot have a default factory")
         # Should I check for other field settings? default_factory
         # seems the most serious to check for.  Maybe add others.  For
         # example, how about init=False (or really,
@@ -312,7 +314,7 @@ def _get_field(cls, a_name, a_type, default_kw_only, typing=None):
         # Make sure kw_only isn't set for ClassVars
         assert f._field_type is _FIELD_CLASSVAR
         if f.kw_only is not MISSING:
-            raise TypeError(f"field {f.name} is a ClassVar but specifies " "kw_only")
+            raise TypeError(f"field {f.name} is a ClassVar but specifies kw_only")
 
     # For real fields, disallow mutable defaults.  Use unhashable as a proxy
     # indicator for mutability.  Read the __hash__ attribute from the class,
@@ -384,9 +386,7 @@ def _field_init(f, globals, self_name):
         globals[default_name] = f.default_factory
         if f.init:
             value = (
-                f"{default_name}() "
-                f"if {f.name} is _HAS_DEFAULT_FACTORY "
-                f"else {f.name}"
+                f"{default_name}() if {f.name} is _HAS_DEFAULT_FACTORY else {f.name}"
             )
         else:
             value = f"{default_name}()"
@@ -444,7 +444,7 @@ def _tuple_str(obj_name, fields):
     if not fields:
         return "()"
     # Note the trailing comma, needed if this turns out to be a 1-tuple.
-    return f'({",".join([f"{obj_name}.{f.name}" for f in fields])},)'
+    return f"({','.join([f'{obj_name}.{f.name}' for f in fields])},)"
 
 
 def _init_fn(
@@ -462,7 +462,7 @@ def _init_fn(
                 seen_default = True
             elif seen_default:
                 raise TypeError(
-                    f"non-default argument {f.name!r} " "follows default argument"
+                    f"non-default argument {f.name!r} follows default argument"
                 )
 
     locals = {f"_type_{f.name}": f.type for f in fields}
@@ -619,7 +619,7 @@ class Element(metaclass=ElementMeta):
             field.validate_value(__value)
         object.__setattr__(self, __name, __value)
 
-    def to_lxml_element(self) -> ET._Element:
+    def to_lxml_element(self) -> LxmlElement:
         tag = getattr(self.__class__, "__tag__", None)
 
         if not tag:
@@ -653,7 +653,7 @@ class Element(metaclass=ElementMeta):
         return ET.tostring(self.to_lxml_element(), **kwargs)
 
     @classmethod
-    def from_lxml_element(cls, element: ET._Element) -> t.Self:
+    def from_lxml_element(cls, element: LxmlElement) -> t.Self:
         constructor_dict = {}
 
         fields = getattr(cls, _FIELDS, {})
