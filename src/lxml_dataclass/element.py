@@ -134,23 +134,24 @@ class ElementField:
             return elements
         return self._element_from_value(value)
 
-    def _value_from_element(self, element):
+    def _value_from_element(self, element, prefix):
         if issubclass(self.coerce.__class__, (ElementMeta, Element)):
-            return self.coerce.from_lxml_element(element)
+            return self.coerce.from_lxml_element(element, prefix)
         return self.coerce(element.text) if element.text is not None else None
 
-    def process_element(self, element):
+    def process_element(self, element, prefix):
         tag = self.tag if self.tag != self.name else self.coerce.__tag__
+        find_tag = f"{prefix}{tag}"
 
         if self.is_iterable:
             values = []
-            for inner_element in element.findall(tag, self.nsmap):
-                values.append(self._value_from_element(inner_element))
+            for inner_element in element.findall(find_tag, self.nsmap):
+                values.append(self._value_from_element(inner_element, prefix))
             return values
 
-        field_element = element.find(tag, self.nsmap)
+        field_element = element.find(find_tag, self.nsmap)
         if field_element is not None:
-            return self._value_from_element(field_element)
+            return self._value_from_element(field_element, prefix)
 
 
 def element_field(
@@ -653,7 +654,7 @@ class Element(metaclass=ElementMeta):
         return ET.tostring(self.to_lxml_element(), **kwargs)
 
     @classmethod
-    def from_lxml_element(cls, element: LxmlElement) -> t.Self:
+    def from_lxml_element(cls, element: LxmlElement, prefix: str = "") -> t.Self:
         constructor_dict = {}
 
         fields = getattr(cls, _FIELDS, {})
@@ -663,21 +664,25 @@ class Element(metaclass=ElementMeta):
             fields.pop(field, None)
 
         for field_name, element_field in fields.items():
-            value = element_field.process_element(element)
+            value = element_field.process_element(element, prefix)
             constructor_dict[field_name] = value
 
-        return cls(**constructor_dict)
+        instance = cls(**constructor_dict)
+        instance.__attrib__ = element.attrib
+        instance.__nsmap__ = element.nsmap
+        return instance
 
     @classmethod
-    def from_data(cls, data: bytes, **kwargs) -> t.Self:
+    def from_data(cls, data: bytes, prefix: str = "", **kwargs) -> t.Self:
         tag = getattr(cls, "__tag__")
 
         if not tag:
             raise AttributeError("You must define __tag__ class attribute")
 
+        find_tag = f"{prefix}{tag}"
         root = ET.fromstring(data, **kwargs)
-        if not root.tag == tag:
+        if find_tag != root.tag:
             raise TypeError(
-                f"The given data root tag is not equal to this class tag data_tag={root.tag}, class_tag{tag}"
+                f"The given data root tag is not equal to this class tag data_tag={root.tag}, class_tag={tag}"
             )
-        return cls.from_lxml_element(root)
+        return cls.from_lxml_element(root, prefix)
