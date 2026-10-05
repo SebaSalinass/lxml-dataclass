@@ -1,0 +1,38 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.13', '3.14']
+        lxml: ['lxml>=5.4.0']
+        include:
+          - python: '3.11'
+            lxml: 'lxml==5.4.0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Build distributions
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - name: Install wheel and test dependencies
+        env:
+          LXML_SPEC: ${{ matrix.lxml }}
+        run: python -m pip install dist/*.whl "$LXML_SPEC" pytest mypy lxml-stubs
+      - name: Run tests against installed package
+        run: python -m pytest
+      - name: Check types
+        run: python -m mypy src/lxml_dataclass

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0.0", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -25,12 +25,21 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/sebasalinass/lxml-dataclass"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "lxml-stubs>=0.5.1",
     "mypy>=1.15.0",
     "pytest>=8.3.5",
-    "twine>=6.1.0",
 ]
 
+[tool.uv]
 no-binary-package = ["lxml"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+disable_error_code = "annotation-unchecked"

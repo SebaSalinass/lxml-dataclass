@@ -1,6 +1,6 @@
 import lxml.etree as ET
 
-from src.lxml_dataclass import Element, element_field
+from lxml_dataclass import Element, element_field
 
 
 class Author(Element):

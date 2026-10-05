@@ -1,3 +1,6 @@
+import copy
+import dataclasses
+import inspect
 import re
 import sys
 import types
@@ -5,7 +8,7 @@ import typing as t
 
 import lxml.etree as ET  # type: ignore
 
-__all__ = ("LxmlElement", "Element", "element_field")
+__all__ = ("Element", "LxmlElement", "element_field")
 
 LxmlElement: t.TypeAlias = ET._Element
 
@@ -36,43 +39,30 @@ _HAS_DEFAULT_FACTORY = _HAS_DEFAULT_FACTORY_CLASS()
 MISSING = _MISSING_TYPE()
 
 
-class InitVar:
-    __slots__ = ("type",)
-
-    def __init__(self, type):
-        self.type = type
-
-    def __repr__(self):
-        if isinstance(self.type, type):
-            type_name = self.type.__name__
-        else:
-            # typing objects, e.g. List[int]
-            type_name = repr(self.type)
-        return f"dataclasses.InitVar[{type_name}]"
-
-    def __class_getitem__(cls, type):
-        return InitVar(type)
+InitVar = dataclasses.InitVar
 
 
 # Field and Field Descriptors.
 class ElementField:
     __slots__ = (
-        "name",
-        "type",
-        "tag",
+        "_field_type",
         "attrib",
-        "nsmap",
-        "display_empty",
-        "validators",
-        "format_spec",
-        "is_iterable",
+        "coerce",
         "compare",
         "default",
         "default_factory",
-        "coerce",
+        "display_empty",
+        "format_spec",
         "init",
+        "is_iterable",
         "kw_only",
-        "_field_type",
+        "localns",
+        "name",
+        "nsmap",
+        "owner",
+        "tag",
+        "type",
+        "validators",
     )
 
     def __init__(
@@ -91,6 +81,8 @@ class ElementField:
         init,
         kw_only,
     ):
+        self.owner = None
+        self.localns = {}
         self.name = None
         self.type = None
         self.tag = tag
@@ -115,43 +107,138 @@ class ElementField:
         for validator in self.validators:
             validator(self, value)
 
-    def _element_from_value(self, value):
-        if isinstance(value, Element):
-            return value.to_lxml_element()
+    def _resolved_type(self):
+        annotation = self.type
+        if isinstance(annotation, (str, t.ForwardRef)) or t.get_args(annotation):
+            holder = types.SimpleNamespace(__annotations__={"value": annotation})
+            module = sys.modules.get(self.owner.__module__)
+            globalns = vars(module) if module else {}
+            localns = dict(self.localns)
+            localns[self.owner.__name__] = self.owner
+            try:
+                annotation = t.get_type_hints(holder, globalns, localns)["value"]
+            except (NameError, TypeError) as exc:
+                if self.coerce is not None:
+                    return t.Any
+                raise TypeError(
+                    f"Cannot resolve annotation for field {self.name!r}; "
+                    "use a resolvable annotation or an explicit coerce callable"
+                ) from exc
+        return _unwrap_annotation(annotation)
 
-        element = ET.Element(self.tag, self.attrib, self.nsmap)
-        if value not in [MISSING, None]:
+    def _collection_type(self):
+        return t.get_origin(self._resolved_type())
+
+    def _is_iterable(self):
+        if self.is_iterable is not None:
+            return self.is_iterable
+        return self._collection_type() in (list, tuple)
+
+    def _converter(self):
+        if self.coerce is not None:
+            return self.coerce
+        annotation = self._resolved_type()
+        if self._is_iterable():
+            args = t.get_args(annotation)
+            if (
+                t.get_origin(annotation) is tuple
+                and args
+                and (len(args) != 2 or args[1] is not Ellipsis)
+            ):
+                raise TypeError(
+                    f"Field {self.name!r} requires a homogeneous tuple[T, ...]"
+                )
+            annotation = _unwrap_annotation(args[0]) if args else str
+        if annotation in (t.Any, list, tuple):
+            return str
+        if t.get_origin(annotation) is not None or not callable(annotation):
+            raise TypeError(
+                f"Unsupported annotation for field {self.name!r}: {annotation!r}; "
+                "provide coerce explicitly"
+            )
+        return annotation
+
+    def _xml_tag(self):
+        converter = self._converter()
+        if self.tag == self.name and _is_element_class(converter):
+            return _class_tag(converter)
+        return self.tag
+
+    def _namespace_map(self, nsmap):
+        converter = self._converter()
+        model_nsmap = (
+            getattr(converter, "__nsmap__", None)
+            if _is_element_class(converter)
+            else None
+        )
+        return {**(nsmap or {}), **(model_nsmap or {}), **(self.nsmap or {})}
+
+    def _element_from_value(self, value, nsmap):
+        field_nsmap = self._namespace_map(nsmap)
+        tag = _qualified_tag(self._xml_tag(), nsmap=field_nsmap)
+        if isinstance(value, Element):
+            if type(value).to_lxml_element is Element.to_lxml_element:
+                element = value._to_lxml_element(field_nsmap)
+            else:
+                element = value.to_lxml_element()
+            element.tag = tag
+            if self.attrib:
+                element.attrib.update(self.attrib)
+            if field_nsmap:
+                replacement = ET.Element(tag, dict(element.attrib), field_nsmap)
+                replacement.text = element.text
+                replacement.tail = element.tail
+                replacement.extend(element)
+                element = replacement
+            return element
+
+        element = ET.Element(tag, self.attrib, field_nsmap or None)
+        if value is not MISSING and value is not None:
             element.text = (
                 format(value, self.format_spec) if self.format_spec else str(value)
             )
         return element
 
-    def process_value(self, value):
-        if self.is_iterable:
-            elements = []
-            for inner_value in value:
-                elements.append(self._element_from_value(inner_value))
-            return elements
-        return self._element_from_value(value)
+    def process_value(self, value, nsmap=None):
+        if self._is_iterable():
+            if value is None or value is MISSING:
+                return []
+            return [self._element_from_value(item, nsmap) for item in value]
+        return self._element_from_value(value, nsmap)
 
     def _value_from_element(self, element, prefix):
-        if issubclass(self.coerce.__class__, (ElementMeta, Element)):
-            return self.coerce.from_lxml_element(element, prefix)
-        return self.coerce(element.text) if element.text is not None else None
+        converter = self._converter()
+        if _is_element_class(converter):
+            if (
+                converter.from_lxml_element.__func__
+                is not Element.from_lxml_element.__func__
+            ):
+                return converter.from_lxml_element(element, prefix)
+            # The field already selected the child, including any tag override.
+            return converter._from_lxml_element(element, prefix)
+        if element.text is None:
+            return "" if converter is str else None
+        if converter is bool:
+            value = element.text.strip().lower()
+            if value in ("true", "1"):
+                return True
+            if value in ("false", "0"):
+                return False
+            raise ValueError(
+                f"Invalid boolean for field {self.name!r}: {element.text!r}"
+            )
+        return converter(element.text)
 
-    def process_element(self, element, prefix):
-        tag = self.tag if self.tag != self.name else self.coerce.__tag__
-        find_tag = f"{prefix}{tag}"
-
-        if self.is_iterable:
-            values = []
-            for inner_element in element.findall(find_tag, self.nsmap):
-                values.append(self._value_from_element(inner_element, prefix))
-            return values
-
-        field_element = element.find(find_tag, self.nsmap)
-        if field_element is not None:
-            return self._value_from_element(field_element, prefix)
+    def process_element(self, element, prefix, nsmap=None):
+        nsmap = self._namespace_map({**element.nsmap, **(nsmap or {})})
+        find_tag = _qualified_tag(self._xml_tag(), prefix, nsmap)
+        matches = [child for child in element if child.tag == find_tag]
+        if not matches:
+            return MISSING
+        if self._is_iterable():
+            values = [self._value_from_element(child, prefix) for child in matches]
+            return tuple(values) if self._collection_type() is tuple else values
+        return self._value_from_element(matches[0], prefix)
 
 
 def element_field(
@@ -162,34 +249,28 @@ def element_field(
     display_empty=False,
     validators=None,
     format_spec=None,
-    is_iterable=False,
+    is_iterable=None,
     compare=True,
     default=MISSING,
     default_factory=MISSING,
     coerce=None,
     init=True,
-    kw_only=False,
-):
-    """_summary_
+    kw_only=MISSING,
+) -> t.Any:
+    """Configure an XML child field on an Element model.
 
-    Args:
-        tag (str): The XML tag for this attribute. <tag>value</tag>
-        attrib (dict, optional): An attributes dictionary is passed as attrib argument on Element creation. Defaults to None.
-        nsmap (dict, optional): An NameSpaceMap dictionary is passed as nsmap argument on Element creation.. Defaults to None.
-        display_empty (bool): Allows the Element creation without value </ tag>. Defaults to False.
-        validators (Callable[[field, value], None], optional): A list of field, value validators called at __setattr__ should raise an error if value is not valid. Defaults to None.
-        format_spec (str, optional): Format spec if needed for the value representation (datetimes, floats, etc). Defaults to None.
-        is_iterable (bool, optional): Allows list detection when attr is another Element type. Defaults to False.
-        compare (bool, optional): Allow this attribute to be check upon equal comparison. Defaults to True.
-        default (Any, optional): Default value for the attribute. Defaults to MISSING.
-        default_factory (Callable[[], Any], optional): A callable default factory. Defaults to MISSING.
-        coerce (Callable[[str], Any], optional): Called on `Element.from_lxml_element(element)` data parsing from an already created ET.Element.  Defaults to None.
-        init (bool, optional): Same as dataclasses behavior. Defaults to True.
-        kw_only (bool, optional): Same as dataclasses behavior. Defaults to False.
-
-    Returns:
-        ElementField: Element field descriptor used to transform class into ET.Element and parsing from it.
+    Collection behavior is inferred from list[T] and tuple[T, ...] unless
+    is_iterable is supplied. coerce converts XML text during parsing only.
+    Validators receive (field, value) on initialization and assignment.
+    Missing XML preserves defaults; display_empty emits empty scalar elements.
+    kw_only inherits the class setting unless explicitly supplied.
     """
+    if default is not MISSING and default_factory is not MISSING:
+        raise ValueError("cannot specify both default and default_factory")
+    if default_factory is not MISSING and not callable(default_factory):
+        raise TypeError("default_factory must be callable")
+    if coerce is not None and not callable(coerce):
+        raise TypeError("coerce must be callable")
     return ElementField(
         tag,
         attrib,
@@ -207,13 +288,52 @@ def element_field(
     )
 
 
+def _unwrap_annotation(annotation):
+    if t.get_origin(annotation) is t.Annotated:
+        return _unwrap_annotation(t.get_args(annotation)[0])
+    if t.get_origin(annotation) in (t.Union, types.UnionType):
+        args = [arg for arg in t.get_args(annotation) if arg is not type(None)]
+        if len(args) == 1:
+            return _unwrap_annotation(args[0])
+    return annotation
+
+
+def _is_element_class(value):
+    return isinstance(value, type) and issubclass(value, Element)
+
+
+def _class_tag(cls):
+    tag = getattr(cls, "__tag__", None)
+    if not tag:
+        raise AttributeError("You must define __tag__ class attribute")
+    return tag
+
+
+def _qualified_tag(tag, prefix="", nsmap=None):
+    """Resolve Clark notation, namespace prefixes, or a default namespace."""
+    if tag.startswith("{"):
+        return tag
+    nsmap = nsmap or {}
+    if ":" in tag:
+        key, local = tag.split(":", 1)
+        if key not in nsmap:
+            raise ValueError(f"Unknown XML namespace prefix {key!r}")
+        return f"{{{nsmap[key]}}}{local}"
+    if prefix:
+        if prefix.startswith("{") and prefix.endswith("}"):
+            return f"{prefix}{tag}"
+        key = prefix.removesuffix(":")
+        if key not in nsmap:
+            raise ValueError(f"Unknown XML namespace prefix {key!r}")
+        return f"{{{nsmap[key]}}}{tag}"
+    if nsmap.get(None):
+        return f"{{{nsmap[None]}}}{tag}"
+    return tag
+
+
 # Type Checkers
 def _is_classvar(a_type, typing):
-    # This test uses a typing internal class, but it's the best way to
-    # test if this is a ClassVar.
-    return a_type is typing.ClassVar or (
-        type(a_type) is typing._GenericAlias and a_type.__origin__ is typing.ClassVar
-    )
+    return a_type is typing.ClassVar or typing.get_origin(a_type) is typing.ClassVar
 
 
 def _is_initvar(a_type, module):
@@ -241,50 +361,34 @@ def _is_type(annotation, cls, a_module, a_type, is_type_predicate):
     return False
 
 
-def _is_iterable_or_tuple(annotation, typing):
-    return typing.get_origin(annotation) in [tuple, list]
-
-
-def _default_coerce(annotation, typing):
-    origin = typing.get_origin(annotation)
-
-    if origin:
-        return typing.get_args(annotation)[0]
-    else:
-        return annotation
-
-
 # Field generation
-def _get_field(cls, a_name, a_type, default_kw_only, typing=None):
+def _get_field(cls, a_name, a_type, default_kw_only, localns, typing=None):
     default = getattr(cls, a_name, MISSING)
 
     if isinstance(default, ElementField):
-        f = default
+        f = copy.copy(default)
     else:
         if isinstance(default, types.MemberDescriptorType):
             default = MISSING
         f = element_field(a_name, default=default)
 
+    f.owner = cls
+    f.localns = localns
     f.name = a_name
     f.type = a_type
     f._field_type = _FIELD
 
-    if typing:
-        if _is_classvar(a_type, typing) or (
+    if typing and (
+        _is_classvar(a_type, typing)
+        or (
             isinstance(f.type, str)
             and _is_type(f.type, cls, typing, typing.ClassVar, _is_classvar)
-        ):
-            f._field_type = _FIELD_CLASSVAR
+        )
+    ):
+        f._field_type = _FIELD_CLASSVAR
 
-        f.is_iterable = _is_iterable_or_tuple(a_type, typing)
-        f.coerce = f.coerce or _default_coerce(a_type, typing)
-
-    # If the type is InitVar, or if it's a matching string annotation,
-    # then it's an InitVar.
     if f._field_type is _FIELD:
-        # The module we're checking against is the module we're
-        # currently in (dataclasses.py).
-        module = sys.modules[__name__]
+        module = dataclasses
         if _is_initvar(a_type, module) or (
             isinstance(f.type, str)
             and _is_type(f.type, cls, module, module.InitVar, _is_initvar)
@@ -295,15 +399,11 @@ def _get_field(cls, a_name, a_type, default_kw_only, typing=None):
     # instead of in the Field() constructor, since only here do we
     # know the field name, which allows for better error reporting.
 
-    # Special restrictions for ClassVar and InitVar.
-    if f._field_type in (_FIELD_CLASSVAR, _FIELD_INITVAR):
-        if f.default_factory is not MISSING:
-            raise TypeError(f"field {f.name} cannot have a default factory")
-        # Should I check for other field settings? default_factory
-        # seems the most serious to check for.  Maybe add others.  For
-        # example, how about init=False (or really,
-        # init=<not-the-default-init-value>)?  It makes no sense for
-        # ClassVar and InitVar to specify init=<anything>.
+    if (
+        f._field_type in (_FIELD_CLASSVAR, _FIELD_INITVAR)
+        and f.default_factory is not MISSING
+    ):
+        raise TypeError(f"field {f.name} cannot have a default factory")
 
     # kw_only validation and assignment.
     if f._field_type in (_FIELD, _FIELD_INITVAR):
@@ -336,7 +436,7 @@ def _fields_in_init_order(fields):
     )
 
 
-# Function Genration
+# Function generation
 def _set_qualname(cls, value):
     # Ensure that the functions returned from _create_fn uses the proper
     # __qualname__ (the class they belong to).
@@ -398,8 +498,14 @@ def _field_init(f, globals, self_name):
             else:
                 globals[default_name] = f.default
                 value = f.name
+        elif f.default is not MISSING:
+            globals[default_name] = f.default
+            value = default_name
         else:
             return None
+
+    if f._field_type is _FIELD_INITVAR:
+        return None
 
     # Now, actually generate the field assignment.
     return _field_assign(f.name, value, self_name)
@@ -432,7 +538,7 @@ def _create_fn(
     local_vars = ", ".join(locals.keys())
     txt = f"def __create_fn__({local_vars}):\n{txt}\n return {name}"
     ns = {}
-    exec(txt, globals, ns)
+    exec(txt, globals, ns)  # noqa: S102
     return ns["__create_fn__"](**locals)
 
 
@@ -454,6 +560,7 @@ def _init_fn(
     kw_only_fields,
     self_name,
     globals,
+    has_post_init,
 ):
     seen_default = False
 
@@ -480,6 +587,10 @@ def _init_fn(
         line = _field_init(f, locals, self_name)
         if line:
             body_lines.append(line)
+
+    if has_post_init:
+        args = ",".join(f.name for f in fields if f._field_type is _FIELD_INITVAR)
+        body_lines.append(f"{self_name}.__post_init__({args})")
 
     # If no body lines, use 'pass'.
     if not body_lines:
@@ -521,56 +632,74 @@ def _cmp_fn(name, op, self_tuple, other_tuple, globals):
 
 
 # Complete class process
-def _process_class(cls, kw_only: bool = False):
-    fields = {}
+def _process_class(cls, kw_only: bool = False, localns=None):
+    fields: dict[str, ElementField] = {}
 
     if cls.__module__ in sys.modules:
         globals = sys.modules[cls.__module__].__dict__
     else:
         globals = {}
 
-    cls_annotations = cls.__dict__.get("__annotations__", {})
+    localns = {**(localns or {}), **vars(cls), cls.__name__: cls}
+    if sys.version_info >= (3, 14):
+        import annotationlib
+
+        cls_annotations = inspect.get_annotations(
+            cls, format=annotationlib.Format.FORWARDREF
+        )
+    else:
+        cls_annotations = inspect.get_annotations(cls)
+    # Resolve known annotations now; self and module forward references can
+    # also be resolved by ElementField when XML is read or written.
+    for name, annotation in cls_annotations.items():
+        try:
+            holder = types.SimpleNamespace(__annotations__={"value": annotation})
+            cls_annotations[name] = t.get_type_hints(holder, globals, localns)["value"]
+        except (NameError, TypeError):
+            pass
     cls_fields = []
+
+    for base in cls.__mro__[-1:0:-1]:
+        fields.update(getattr(base, _FIELDS, {}))
 
     typing = sys.modules.get("typing")
 
     for f_name, f_type in cls_annotations.items():
-        cls_fields.append(_get_field(cls, f_name, f_type, kw_only, typing))
+        cls_fields.append(_get_field(cls, f_name, f_type, kw_only, localns, typing))
 
     for f in cls_fields:
         fields[f.name] = f
         if f.name and isinstance(getattr(cls, f.name, None), ElementField):
-            setattr(cls, f.name, f)
+            if f.default is not MISSING:
+                setattr(cls, f.name, f.default)
+            else:
+                delattr(cls, f.name)
 
     for name, value in cls.__dict__.items():
         if isinstance(value, ElementField) and name not in cls_annotations:
             raise TypeError(f"{name!r} is a field but has no type annotation")
 
-    for b in cls.__mro__[-1:0:-1]:
-        # Only process classes that have been processed by our
-        # decorator.  That is, they have a _FIELDS attribute.
-        base_fields = getattr(b, _FIELDS, None)
-        if base_fields is not None:
-            for f in base_fields.values():
-                fields[f.name] = f
-
     setattr(cls, _FIELDS, fields)
 
-    all_init_fields = [f for f in fields.values()]
+    all_init_fields = [
+        f for f in fields.values() if f._field_type is not _FIELD_CLASSVAR
+    ]
 
     (std_init_fields, kw_only_init_fields) = _fields_in_init_order(all_init_fields)
 
-    _set_new_attribute(
-        cls,
-        "__init__",
-        _init_fn(
-            all_init_fields,
-            std_init_fields,
-            kw_only_init_fields,
-            "__dataclass_self__" if "self" in fields else "self",
-            globals,
-        ),
-    )
+    if "__init__" not in cls.__dict__:
+        _set_new_attribute(
+            cls,
+            "__init__",
+            _init_fn(
+                all_init_fields,
+                std_init_fields,
+                kw_only_init_fields,
+                "__dataclass_self__" if "self" in fields else "self",
+                globals,
+                hasattr(cls, "__post_init__"),
+            ),
+        )
 
     # Create __eq__ method.  There's no need for a __ne__ method,
     # since python will call __eq__ and negate it.
@@ -578,9 +707,15 @@ def _process_class(cls, kw_only: bool = False):
     flds = [f for f in field_list if f.compare]
     self_tuple = _tuple_str("self", flds)
     other_tuple = _tuple_str("other", flds)
-    _set_new_attribute(
-        cls, "__eq__", _cmp_fn("__eq__", "==", self_tuple, other_tuple, globals=globals)
-    )
+    if (
+        not _set_new_attribute(
+            cls,
+            "__eq__",
+            _cmp_fn("__eq__", "==", self_tuple, other_tuple, globals=globals),
+        )
+        and "__hash__" not in cls.__dict__
+    ):
+        cls.__hash__ = None
 
     return cls
 
@@ -596,24 +731,22 @@ class ElementMeta(type):
         *,
         kw_only=False,
     ):
-        class_ = super(ElementMeta, cls).__new__(cls, name, bases, namespace)
-        processed_class = _process_class(class_, kw_only)
+        class_ = super().__new__(cls, name, bases, namespace)
+        frame = inspect.currentframe()
+        try:
+            localns = dict(frame.f_back.f_locals) if frame and frame.f_back else {}
+        finally:
+            del frame
+        processed_class = _process_class(class_, kw_only, localns)
 
         return processed_class
 
 
 # Usable Element Class
 class Element(metaclass=ElementMeta):
-    """The base Element class allows xml representation through lxml implementation
+    """Base for annotated XML models with generated initialization and equality."""
 
-    >>> class Author(Element):
-    >>>     __tag__ = 'Author'
-
-    >>>     name: str = element_field('Name')
-    >>>     last: str = element_field('LastName', default='Doe')
-    """
-
-    def __setattr__(self, __name, __value):
+    def __setattr__(self, /, __name, __value):
         fields = getattr(self.__class__, _FIELDS, {})
 
         if field := fields.get(__name):
@@ -621,68 +754,89 @@ class Element(metaclass=ElementMeta):
         object.__setattr__(self, __name, __value)
 
     def to_lxml_element(self) -> LxmlElement:
-        tag = getattr(self.__class__, "__tag__", None)
+        """Build a new lxml tree from this model and its nested models."""
+        return self._to_lxml_element()
 
-        if not tag:
-            raise AttributeError("You must define __tag__ class attribute")
+    def _to_lxml_element(self, inherited_nsmap=None) -> LxmlElement:
+        tag = _class_tag(self.__class__)
 
         attrib = getattr(self, "__attrib__", None)
-        nsmap = getattr(self, "__nsmap__", None)
+        nsmap = {**(inherited_nsmap or {}), **(getattr(self, "__nsmap__", None) or {})}
 
-        root = ET.Element(tag, attrib, nsmap)
+        root = ET.Element(_qualified_tag(tag, nsmap=nsmap), attrib, nsmap or None)
         fields = getattr(self.__class__, _FIELDS, {})
         ignored_fields = getattr(self.__class__, _IGNORED_FIELDS, [])
 
         for field_name, element_field in fields.items():
-            if field_name in ignored_fields:
+            if field_name in ignored_fields or element_field._field_type is not _FIELD:
                 continue
 
             value = getattr(self, field_name, None)
-            if not value and not element_field.display_empty:
+            if (
+                value is None
+                or value is MISSING
+                or (isinstance(value, str) and value == "")
+            ) and not element_field.display_empty:
                 continue
 
-            root_operation = root.extend if element_field.is_iterable else root.append
-            root_operation(element_field.process_value(value))
+            root_operation = (
+                root.extend if element_field._is_iterable() else root.append
+            )
+            root_operation(element_field.process_value(value, nsmap))
 
         return root
 
-    def to_string_element(self, **kwargs) -> bytes:
-        """Calls `lxml.etree.tostring` function on the result of `self.to_lxml_element()`. Accepts any kwargs valid for `lxml.etree.tostring` function.
-        Returns:
-            bytes: String representation of the element
+    def to_string_element(self, **kwargs) -> bytes | str:
+        """Serialize with lxml.etree.tostring options.
+
+        Returns bytes by default, or str with encoding="unicode".
         """
         return ET.tostring(self.to_lxml_element(), **kwargs)
 
     @classmethod
     def from_lxml_element(cls, element: LxmlElement, prefix: str = "") -> t.Self:
-        constructor_dict = {}
+        """Parse a matching XML root; preserve defaults for absent children."""
+        nsmap = {**element.nsmap, **(getattr(cls, "__nsmap__", None) or {})}
+        expected = _qualified_tag(_class_tag(cls), prefix, nsmap)
+        if element.tag != expected:
+            raise TypeError(
+                f"The given data root tag is not equal to this class tag "
+                f"data_tag={element.tag}, class_tag={expected}"
+            )
+        return cls._from_lxml_element(element, prefix)
 
-        fields = getattr(cls, _FIELDS, {})
-        ignored_fields = getattr(cls, _IGNORED_FIELDS, [])
-
-        for field in ignored_fields:
-            fields.pop(field, None)
-
-        for field_name, element_field in fields.items():
-            value = element_field.process_element(element, prefix)
-            constructor_dict[field_name] = value
+    @classmethod
+    def _from_lxml_element(cls, element: LxmlElement, prefix: str = "") -> t.Self:
+        constructor_dict: dict[str, t.Any] = {}
+        assignments: dict[str, t.Any] = {}
+        ignored_fields = getattr(cls, _IGNORED_FIELDS, ())
+        for field_name, field in getattr(cls, _FIELDS, {}).items():
+            if field_name in ignored_fields or field._field_type is not _FIELD:
+                continue
+            value = field.process_element(
+                element, prefix, getattr(cls, "__nsmap__", None)
+            )
+            if value is MISSING:
+                if field.default is not MISSING or field.default_factory is not MISSING:
+                    continue
+                annotation = field._resolved_type()
+                # Required collections naturally parse to empty containers.
+                if field._is_iterable():
+                    value = () if t.get_origin(annotation) is tuple else []
+                else:
+                    raise ValueError(f"Missing required XML field {field_name!r}")
+            (constructor_dict if field.init else assignments)[field_name] = value
 
         instance = cls(**constructor_dict)
-        instance.__attrib__ = element.attrib
-        instance.__nsmap__ = element.nsmap
+        for name, value in assignments.items():
+            setattr(instance, name, value)
+        instance.__attrib__ = dict(element.attrib)
+        instance.__nsmap__ = dict(element.nsmap)
         return instance
 
     @classmethod
-    def from_data(cls, data: bytes, prefix: str = "", **kwargs) -> t.Self:
-        tag = getattr(cls, "__tag__")
-
-        if not tag:
-            raise AttributeError("You must define __tag__ class attribute")
-
-        find_tag = f"{prefix}{tag}"
+    def from_data(cls, data: bytes | str, prefix: str = "", **kwargs) -> t.Self:
+        """Parse XML with lxml.etree.fromstring, forwarding parser options."""
+        _class_tag(cls)
         root = ET.fromstring(data, **kwargs)
-        if find_tag != root.tag:
-            raise TypeError(
-                f"The given data root tag is not equal to this class tag data_tag={root.tag}, class_tag={tag}"
-            )
         return cls.from_lxml_element(root, prefix)
